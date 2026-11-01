@@ -1,0 +1,178 @@
+#!/usr/bin/env python3
+"""
+SD SAVE CARD.py  (Windows 11 version)
+Backup an SD card / USB drive on Windows 11.
+
+Usage (run as Administrator):
+    python SD_SAVE_CARD.py
+
+Supports:
+  - Full raw disk image (requires dd.exe in PATH)
+  - File-level copy of the drive letter (no extra tools needed)
+"""
+
+import os
+import sys
+import subprocess
+import shutil
+from pathlib import Path
+
+def run_powershell(command):
+    """Run a PowerShell command and return stdout."""
+    try:
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", command],
+            capture_output=True, text=True, check=True
+        )
+        return result.stdout.strip()
+    except subprocess.CalledProcessError as e:
+        print(f"PowerShell error: {e.stderr}")
+        return ""
+
+def list_disks():
+    """List physical disks and their partitions using PowerShell."""
+    print("\n" + "="*70)
+    print("PHYSICAL DISKS")
+    print("="*70)
+    cmd = """
+    Get-Disk | Select-Object Number, FriendlyName, @{N='SizeGB';E={[math]::Round($_.Size/1GB,2)}}, 
+    PartitionStyle, OperationalStatus, BusType | Format-Table -AutoSize | Out-String
+    """
+    print(run_powershell(cmd))
+
+    print("="*70)
+    print("PARTITIONS / DRIVE LETTERS")
+    print("="*70)
+    cmd2 = """
+    Get-Partition | Where-Object {$_.DriveLetter} | 
+    Select-Object DiskNumber, DriveLetter, @{N='SizeGB';E={[math]::Round($_.Size/1GB,2)}}, Type | 
+    Format-Table -AutoSize | Out-String
+    """
+    print(run_powershell(cmd2))
+
+def get_removable_disks():
+    """Try to identify likely SD/USB removable disks."""
+    cmd = """
+    Get-Disk | Where-Object {$_.BusType -eq 'USB' -or $_.BusType -eq 'SD'} | 
+    Select-Object Number, FriendlyName, @{N='SizeGB';E={[math]::Round($_.Size/1GB,2)}} | 
+    Format-Table -AutoSize | Out-String
+    """
+    output = run_powershell(cmd)
+    if output.strip():
+        print("\nLikely removable / SD / USB disks:")
+        print(output)
+    else:
+        print("\nNo obvious removable disks detected. Use the full list above.")
+
+def confirm(prompt):
+    ans = input(f"{prompt} [y/N]: ").strip().lower()
+    return ans in ("y", "yes")
+
+def has_dd():
+    return shutil.which("dd") is not None
+
+def image_with_dd(disk_number, outfile):
+    """Create a raw image using dd (Windows style)."""
+    device = f"\\\\.\\PhysicalDrive{disk_number}"
+    print(f"\nCreating full disk image with dd...")
+    print(f"  Source : {device}")
+    print(f"  Output : {outfile}")
+    
+    # Windows dd usually wants this syntax
+    cmd = [
+        "dd",
+        f"if={device}",
+        f"of={outfile}",
+        "bs=4M",
+        "--progress"
+    ]
+    print("Command:", " ".join(cmd))
+    try:
+        subprocess.run(cmd, check=True)
+        print(f"\nImage saved: {outfile}")
+        size = Path(outfile).stat().st_size
+        print(f"Size: {size / (1024**3):.2f} GiB")
+    except Exception as e:
+        print(f"dd failed: {e}")
+        print("Make sure dd.exe is in your PATH and you are running as Administrator.")
+
+def file_copy_backup(drive_letter, outfile_dir):
+    """Copy all files from a drive letter (safer, no raw access)."""
+    src = f"{drive_letter}:\\"
+    dest = Path(outfile_dir)
+    dest.mkdir(parents=True, exist_ok=True)
+    
+    print(f"\nCopying files from {src} to {dest}")
+    print("This is a file-level backup (not a full disk image).")
+    
+    try:
+        # Use robocopy for speed and reliability on Windows
+        cmd = [
+            "robocopy", src, str(dest),
+            "/E", "/COPY:DAT", "/R:1", "/W:1", "/MT:8", "/NFL", "/NDL", "/NP"
+        ]
+        subprocess.run(cmd)
+        print(f"\nFile backup finished in: {dest}")
+    except Exception as e:
+        print(f"Copy failed: {e}")
+        # Fallback to shutil
+        try:
+            shutil.copytree(src, dest / "files", dirs_exist_ok=True)
+            print("Fallback copy completed.")
+        except Exception as e2:
+            print(f"Fallback also failed: {e2}")
+
+def main():
+    if os.name != "nt":
+        print("This script is for Windows 11 only.")
+        sys.exit(1)
+
+    print("="*60)
+    print("  SD SAVE CARD.py  (Windows 11)")
+    print("="*60)
+    print("Run this script as Administrator for best results.\n")
+
+    list_disks()
+    get_removable_disks()
+
+    print("\nBackup modes:")
+    print("  1. Full disk image (.img)  — requires dd.exe")
+    print("  2. File copy of drive letter — works out of the box")
+
+    mode = input("\nChoose mode (1 or 2) [2]: ").strip() or "2"
+
+    if mode == "1":
+        if not has_dd():
+            print("\ndd.exe was not found in PATH.")
+            print("Install a Windows dd (chrysocome.net/dd or Chocolatey) and try again.")
+            print("Falling back to file-copy mode.")
+            mode = "2"
+        else:
+            disk_num = input("Enter Physical Drive number to image (e.g. 2 for PhysicalDrive2): ").strip()
+            if not disk_num.isdigit():
+                print("Invalid disk number.")
+                sys.exit(1)
+            default_name = f"sd-backup-disk{disk_num}.img"
+            outfile = input(f"Output .img file [{default_name}]: ").strip() or default_name
+            print(f"\nWARNING: This will read the entire physical disk {disk_num}.")
+            if confirm("Continue with full image?"):
+                image_with_dd(disk_num, outfile)
+            else:
+                print("Cancelled.")
+            return
+
+    # File copy mode
+    letter = input("\nEnter drive letter of the SD card (e.g. E): ").strip().upper()
+    if not letter or len(letter) != 1:
+        print("Invalid drive letter.")
+        sys.exit(1)
+    dest = input("Destination folder for files [sd-backup-files]: ").strip() or "sd-backup-files"
+    
+    print(f"\nAbout to copy all files from {letter}:\\ to {dest}")
+    if confirm("Continue?"):
+        file_copy_backup(letter, dest)
+    else:
+        print("Cancelled.")
+
+if __name__ == "__main__":
+    main()
