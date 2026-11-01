@@ -1,0 +1,150 @@
+#!/usr/bin/env python3
+"""
+SSD CARD.py  (Windows 11)
+List, inspect, and backup SSDs on Windows 11.
+
+Usage (run as Administrator for full features):
+    python SSD_CARD.py
+
+Features:
+  - List physical disks and highlight SSDs
+  - Show basic health / media type via PowerShell
+  - Full disk image backup (requires dd.exe)
+  - File-level backup of a drive letter
+"""
+
+import os
+import sys
+import subprocess
+import shutil
+from pathlib import Path
+
+def run_powershell(command):
+    try:
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", command],
+            capture_output=True, text=True, check=True
+        )
+        return result.stdout.strip()
+    except subprocess.CalledProcessError as e:
+        print(f"PowerShell error: {e.stderr}")
+        return ""
+
+def list_disks_and_ssds():
+    print("\n" + "="*70)
+    print("ALL PHYSICAL DISKS")
+    print("="*70)
+    cmd = """
+    Get-Disk | Select-Object Number, FriendlyName, 
+    @{N='SizeGB';E={[math]::Round($_.Size/1GB,2)}}, 
+    PartitionStyle, OperationalStatus, BusType | Format-Table -AutoSize | Out-String
+    """
+    print(run_powershell(cmd))
+
+    print("="*70)
+    print("PHYSICAL DISK DETAILS (Media Type / Health)")
+    print("="*70)
+    cmd2 = """
+    Get-PhysicalDisk | Select-Object DeviceId, FriendlyName, MediaType, HealthStatus, 
+    @{N='SizeGB';E={[math]::Round($_.Size/1GB,2)}}, BusType | Format-Table -AutoSize | Out-String
+    """
+    print(run_powershell(cmd2))
+
+    print("="*70)
+    print("PARTITIONS WITH DRIVE LETTERS")
+    print("="*70)
+    cmd3 = """
+    Get-Partition | Where-Object {$_.DriveLetter} | 
+    Select-Object DiskNumber, DriveLetter, @{N='SizeGB';E={[math]::Round($_.Size/1GB,2)}}, Type | 
+    Format-Table -AutoSize | Out-String
+    """
+    print(run_powershell(cmd3))
+
+def confirm(prompt):
+    return input(f"{prompt} [y/N]: ").strip().lower() in ("y", "yes")
+
+def has_dd():
+    return shutil.which("dd") is not None
+
+def image_with_dd(disk_number, outfile):
+    device = f"\\\\.\\PhysicalDrive{disk_number}"
+    print(f"\nCreating full disk image with dd...")
+    print(f"  Source : {device}")
+    print(f"  Output : {outfile}")
+    cmd = ["dd", f"if={device}", f"of={outfile}", "bs=4M", "--progress"]
+    print("Command:", " ".join(cmd))
+    try:
+        subprocess.run(cmd, check=True)
+        print(f"\nImage saved: {outfile}")
+        size = Path(outfile).stat().st_size
+        print(f"Size: {size / (1024**3):.2f} GiB")
+    except Exception as e:
+        print(f"dd failed: {e}")
+        print("Ensure dd.exe is in PATH and you are running as Administrator.")
+
+def file_copy_backup(drive_letter, outfile_dir):
+    src = f"{drive_letter}:\\"
+    dest = Path(outfile_dir)
+    dest.mkdir(parents=True, exist_ok=True)
+    print(f"\nCopying files from {src} to {dest}")
+    try:
+        cmd = ["robocopy", src, str(dest), "/E", "/COPY:DAT", "/R:1", "/W:1", "/MT:8", "/NFL", "/NDL", "/NP"]
+        subprocess.run(cmd)
+        print(f"\nFile backup finished in: {dest}")
+    except Exception as e:
+        print(f"Copy failed: {e}")
+        try:
+            shutil.copytree(src, dest / "files", dirs_exist_ok=True)
+            print("Fallback copy completed.")
+        except Exception as e2:
+            print(f"Fallback also failed: {e2}")
+
+def main():
+    if os.name != "nt":
+        print("This script is for Windows 11 only.")
+        sys.exit(1)
+
+    print("="*60)
+    print("  SSD CARD.py  (Windows 11)")
+    print("="*60)
+    print("Run as Administrator for disk imaging and full info.\n")
+
+    list_disks_and_ssds()
+
+    print("\nOptions:")
+    print("  1. Full disk image of an SSD/disk (.img) — needs dd.exe")
+    print("  2. File copy backup of a drive letter")
+    print("  3. Exit")
+
+    choice = input("\nChoose (1/2/3) [3]: ").strip() or "3"
+
+    if choice == "1":
+        if not has_dd():
+            print("\ndd.exe not found in PATH.")
+            print("Install from chrysocome.net/dd or Chocolatey, then retry.")
+            return
+        disk_num = input("Enter Physical Drive number (e.g. 1 for PhysicalDrive1): ").strip()
+        if not disk_num.isdigit():
+            print("Invalid number.")
+            return
+        default_name = f"ssd-backup-disk{disk_num}.img"
+        outfile = input(f"Output .img [{default_name}]: ").strip() or default_name
+        print(f"\nWARNING: Full read of physical disk {disk_num}.")
+        if confirm("Continue?"):
+            image_with_dd(disk_num, outfile)
+
+    elif choice == "2":
+        letter = input("Drive letter (e.g. C or D): ").strip().upper()
+        if not letter or len(letter) != 1:
+            print("Invalid letter.")
+            return
+        dest = input("Destination folder [ssd-backup-files]: ").strip() or "ssd-backup-files"
+        print(f"\nCopy all files from {letter}:\\ to {dest}")
+        if confirm("Continue?"):
+            file_copy_backup(letter, dest)
+
+    else:
+        print("Exiting.")
+
+if __name__ == "__main__":
+    main()
